@@ -1,62 +1,29 @@
-name: Manual file edit
-
+name: Manual File Edit
 on:
   workflow_dispatch:
-    inputs:
-      path:
-        description: 'Relative file path (e.g., context/history-2025-10-16.md)'
-        required: true
-        default: 'context/history-YYYY-MM-DD.md'
-      mode:
-        description: 'append or overwrite'
-        required: true
-        default: 'overwrite'
-      content:
-        description: 'Content to write (supports multiline)'
-        required: true
 
 jobs:
-  edit:
+  manual:
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # חשוב: מאפשר כתיבה
+      contents: write
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure git
+      - name: Ensure folders exist
         run: |
-          git config user.name  "github-actions[bot]"
+          mkdir -p journals context data-hub/n8n
+          echo "# Journal Folder" > journals/README.md
+          echo "# Context Folder" > context/README.md
+          echo "# Data Hub (n8n)" > data-hub/n8n/README.md
+
+      - name: Commit new or edited files
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Apply change
-        shell: bash
-        run: |
-          set -euo pipefail
-          FILE="${{ github.event.inputs.path }}"
-          MODE="${{ github.event.inputs.mode }}"
-          mkdir -p "$(dirname "$FILE")"
-
-          if [ "$MODE" = "overwrite" ]; then
-            cat > "$FILE" <<'EOF'
-${{ github.event.inputs.content }}
-EOF
-          else
-            echo "" >> "$FILE"
-            cat >> "$FILE" <<'EOF'
-${{ github.event.inputs.content }}
-EOF
-          fi
-
-      - name: Commit & push (if changed)
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! git diff --quiet; then
-            git add -A
-            git commit -m "chore(edit): ${{ github.event.inputs.mode }} ${{
-              github.event.inputs.path }}"
-            git push
-          else
-            echo "No changes to commit."
-          fi
+          git add journals context data-hub || true
+          git commit -m "manual edit: synced folder structure" || echo "no changes to commit"
+          git push
