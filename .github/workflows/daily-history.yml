@@ -1,0 +1,31 @@
+name: 📅 Daily History Log
+
+on:
+  schedule:
+    - cron: "0 21 * * *"  # כל יום ב-00:00 לפי שעון ישראל (21:00 UTC)
+  workflow_dispatch:      # מאפשר להריץ ידנית
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set timezone
+        run: sudo timedatectl set-timezone Asia/Jerusalem
+
+      - name: Create daily history file
+        run: |
+          mkdir -p context
+          FILE="context/history-$(date +'%Y-%m-%d').md"
+          echo "# יומן אוטומטי לתאריך $(date +'%d/%m/%Y')" > "$FILE"
+          echo "" >> "$FILE"
+          echo "🕓 נוצר אוטומטית בשעה $(date +'%H:%M:%S')" >> "$FILE"
+          echo "📈 התקדמות כוללת: 0%" >> "$FILE"
+          echo "" >> "$FILE"
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add "$FILE"
+          git commit -m "✨ יצירת יומן יומי אוטומטי לתאריך $(date +'%d/%m/%Y')" || echo "No changes to commit"
+          git push
