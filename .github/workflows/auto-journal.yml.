@@ -1,0 +1,246 @@
+name: Auto Journal
+
+on:
+  # הפעלה ידנית מהטאב Actions
+  workflow_dispatch:
+    inputs:
+      action:
+        description: write | append | delete | get
+        required: true
+        default: write
+      text:
+        description: Content to write (ignored for delete/get unless used as query)
+        required: false
+        default: ""
+      date:
+        description: YYYY-MM-DD or "today"
+        required: false
+        default: today
+      mode:
+        description: overwrite | append (for write)
+        required: false
+        default: overwrite
+
+  # הפעלה מתוך תגובה ל-Issue (שפה טבעית: "כתוב ביומן", "מחק יומן", "שלוף")
+  issue_comment:
+    types: [created]
+
+  # אפשרות להפעיל מבחוץ (לדוגמה מ-n8n/Space)
+  repository_dispatch:
+    types: [journal]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  journal:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Parse command (smart Hebrew/English)
+        id: parse
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const from = context.eventName;
+            // defaults
+            let action = core.getInput('action') || 'write';
+            let text   = core.getInput('text')   || '';
+            let date   = core.getInput('date')   || 'today';
+            let mode   = core.getInput('mode')   || 'overwrite';
+
+            // If triggered from repository_dispatch
+            if (from === 'repository_dispatch' && context.payload?.client_payload) {
+              const p = context.payload.client_payload;
+              if (p.action) action = p.action;
+              if (p.text)   text   = p.text;
+              if (p.date)   date   = p.date;
+              if (p.mode)   mode   = p.mode;
+            }
+
+            // If triggered from issue_comment, try to infer intent from natural language (Heb/Eng)
+            if (from === 'issue_comment') {
+              const body = context.payload.comment.body.trim();
+              // Very simple “smart” NLP:
+              // write
+              if (/(כתוב|כתבי|רשום|הוסף|add|write)\s+ביומן/i.test(body)) {
+                action = 'write';
+                mode   = /הוסף|append/i.test(body) ? 'append' : 'overwrite';
+                const m = body.match(/יומן[:\s-]*(.*)$/i);
+                if (m && m[1]) text = m[1].trim(); // everything after "יומן"
+              }
+              // append
+              else if (/(append|הוסף) (ליומ(ן|ן))/i.test(body)) {
+                action = 'append'; mode = 'append';
+                const m = body.match(/(?:append|הוסף).*(?:יומן|journal)[:\s-]*(.*)$/i);
+                if (m && m[1]) text = m[1].trim();
+              }
+              // delete
+              else if (/(מחק|מיחק|מחקי|delete)\s+יומן/i.test(body)) {
+                action = 'delete';
+                // date inside body?
+                const dm = body.match(/(\d{4}-\d{2}-\d{2})/);
+                date = dm ? dm[1] : 'today';
+              }
+              // get
+              else if (/(שלוף|הצג|הראה|get|show)\s+יומן/i.test(body)) {
+                action = 'get';
+                const dm = body.match(/(\d{4}-\d{2}-\d{2})/);
+                date = dm ? dm[1] : 'today';
+                const qm = body.match(/(?:שלוף|הצג|get|show).*?יומן[:\s-]*(.*)$/i);
+                if (qm && qm[1]) text = qm[1].trim(); // query
+              }
+              // fallback: treat any "יומן ..." as write-append
+              else if (/^יומן/i.test(body)) {
+                action = 'write';
+                mode   = 'append';
+                text   = body.replace(/^יומן[:\s-]*/i,'').trim();
+              }
+            }
+
+            core.setOutput('action', action);
+            core.setOutput('text', text);
+            core.setOutput('date', date);
+            core.setOutput('mode', mode);
+
+      - name: Compute paths (smart daily file)
+        id: path
+        run: |
+          set -euo pipefail
+          DATE_IN="${{ steps.parse.outputs.date }}"
+          if [ "$DATE_IN" = "today" ] || [ -z "$DATE_IN" ]; then
+            DATE="$(date -u +%Y-%m-%d)"
+          else
+            DATE="$DATE_IN"
+          fi
+
+          YEAR="${DATE%%-*}"
+          DIR="context/history/${YEAR}"
+          FILE="${DIR}/history-${DATE}.md"
+
+          mkdir -p "$DIR"
+          echo "date=$DATE"   >> $GITHUB_OUTPUT
+          echo "dir=$DIR"     >> $GITHUB_OUTPUT
+          echo "file=$FILE"   >> $GITHUB_OUTPUT
+
+      - name: Act (write/append/delete/get)
+        id: act
+        shell: bash
+        env:
+          ACTION: ${{ steps.parse.outputs.action }}
+          MODE:   ${{ steps.parse.outputs.mode }}
+          TEXT:   ${{ steps.parse.outputs.text }}
+          FILE:   ${{ steps.path.outputs.file }}
+          DATE:   ${{ steps.path.outputs.date }}
+        run: |
+          set -euo pipefail
+
+          echo "Action=$ACTION | Mode=$MODE | Date=$DATE"
+          case "$ACTION" in
+            write)
+              if [ "${MODE}" = "overwrite" ] || [ ! -f "$FILE" ]; then
+                {
+                  echo "# יומן פרויקט N8N — ${DATE}"
+                  echo
+                  echo "⏰ שעה (UTC): $(date -u +%H:%M)"
+                  echo "✍️  ${GITHUB_ACTOR}"
+                  echo
+                  [ -n "${TEXT}" ] && echo "${TEXT}"
+                } > "$FILE"
+              else
+                # append
+                {
+                  echo
+                  echo "## עדכון — $(date -u +%H:%M)"
+                  [ -n "${TEXT}" ] && echo "${TEXT}"
+                } >> "$FILE"
+              fi
+              ;;
+
+            append)
+              {
+                echo
+                echo "## עדכון — $(date -u +%H:%M)"
+                [ -n "${TEXT}" ] && echo "${TEXT}"
+              } >> "$FILE"
+              ;;
+
+            delete)
+              if [ -f "$FILE" ]; then
+                rm -f "$FILE"
+                echo "deleted=true" >> $GITHUB_OUTPUT
+              else
+                echo "deleted=false" >> $GITHUB_OUTPUT
+              fi
+              ;;
+
+            get)
+              if [ -f "$FILE" ]; then
+                echo "found=true" >> $GITHUB_OUTPUT
+                echo "-----BEGIN-----"
+                sed -n '1,200p' "$FILE"
+                echo "-----END-----"
+              else
+                echo "found=false" >> $GITHUB_OUTPUT
+              fi
+              ;;
+
+            *)
+              echo "Unknown action: $ACTION" >&2
+              exit 2
+              ;;
+          esac
+
+          # Maintain pointer to latest file
+          if [ "$ACTION" != "get" ] && [ "$ACTION" != "delete" ]; then
+            {
+              echo "Latest: $FILE"
+              echo "Updated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            } > context/LATEST.md
+          fi
+
+      - name: Commit & push (if changed)
+        if: ${{ steps.parse.outputs.action != 'get' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git add -A
+            git commit -m "journal(${ { steps.path.outputs.date } }): ${{ steps.parse.outputs.action }} ${{ steps.parse.outputs.mode }}"
+            git push
+          else
+            echo "No changes."
+          fi
+
+      - name: Reply to issue (if comment trigger)
+        if: ${{ github.event_name == 'issue_comment' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const action = '${{ steps.parse.outputs.action }}';
+            const date   = '${{ steps.path.outputs.date }}';
+            const file   = '${{ steps.path.outputs.file }}';
+            let msg = '';
+
+            if (action === 'get') {
+              msg = `📖 יומן לתאריך **${date}**${{ steps.act.outputs.found == 'true' && '' || ' — לא נמצא' }}`;
+            } else if (action === 'delete') {
+              msg = ${{ steps.act.outputs.deleted == 'true' }} ? 
+                    `🗑️ נמחק היומן של **${date}**.` : 
+                    `ℹ️ לא נמצא יומן למחיקה בתאריך **${date}**.`;
+            } else {
+              msg = `✅ עודכן היומן של **${date}**.\n\nקובץ: \`${file}\``;
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body: msg
+            })
